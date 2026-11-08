@@ -100,9 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="log file path; defaults to <backup-dir>/backup.log",
     )
     parser.add_argument(
-        "--launch", action="store_true",
-        help="run as the detached worker (invoked by the launcher); the foreground "
-             "path is skipped and the archive is built inside this session",
+        "--detach-worker", "--background", dest="launch", action="store_true",
+        help="run as the detached worker (invoked by the launcher); the foreground path is skipped and the archive is built inside this session",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -290,7 +289,7 @@ def _launch_worker(paths: Paths, args: argparse.Namespace) -> bool:
     stdin from /dev/null and stdout/stderr appended to log_file (the nohup role); it is the
     authority on the backup and survives the launcher terminating its process group."""
     script = sys.argv[0] if sys.argv[:1] else os.path.abspath(__file__)
-    cmd = [sys.executable, "-B", script, *sys.argv[1:], "--launch"]
+    cmd = [sys.executable, "-B", script, *sys.argv[1:], "--detach-worker"]
     try:
         with open(paths.log_file, "ab") as log_stream:
             proc = subprocess.Popen(
