@@ -18,6 +18,7 @@ order; the ``_STEPS`` markers below indicate where each belongs.
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 from collections import namedtuple
 import os
@@ -162,6 +163,21 @@ def resolve_paths(args: argparse.Namespace) -> Paths:
         os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
     except OSError as exc:
         raise SetupError(f"cannot create backup directory {backup_dir!r}: {exc}") from exc
+    return Paths(folder=folder, backup_dir=backup_dir, log_file=log_file, lock_path=lock_path, pid_path=pid_path)
+
+
+def newest_backup(backup_dir: str) -> str | None:
+    """Path of the newest `*.tar.zst` in backup_dir by mtime, else None.
+
+    Empty/missing/unreadable backup_dir yields None so the caller proceeds.
+    """
+    try:
+        names = glob.glob(os.path.join(backup_dir, "*.tar.zst"))
+    except OSError:
+        return None
+    if not names:
+        return None
+    return max(names, key=os.path.getmtime)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,6 +193,14 @@ def main(argv: list[str] | None = None) -> int:
     except SetupError as exc:
         logger.error("setup failed: %s", exc)
         return 2
+    logger.info("resolved: folder=%s backup_dir=%s log_file=%s",
+                paths.folder, paths.backup_dir, paths.log_file)
+
+    # Step 4 (agents.md): age gate — skip if the newest backup is younger than max_age.
+    newest = newest_backup(paths.backup_dir)
+    if newest is not None and now() - os.path.getmtime(newest) < DEFAULT_MAX_AGE_HOURS * 3600.0:
+        logger.info("skip recent backup %s", newest)
+        return 0
     logger.info("skeleton: wiring plan.md steps %s; see agents.md for the sequence",
                 ", ".join(_STEPS))
     return 0
