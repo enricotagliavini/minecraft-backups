@@ -24,6 +24,7 @@ import logging
 from collections import namedtuple
 import os
 import sys
+import subprocess
 import time
 
 # --- defaults (§3 of plan.md) -------------------------------------------------
@@ -97,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-l", "--log-file", metavar="PATH",
         help="log file path; defaults to <backup-dir>/backup.log",
+    )
+    parser.add_argument(
+        "--launch", action="store_true",
+        help="run as the detached worker (invoked by the launcher); the foreground "
+             "path is skipped and the archive is built inside this session",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -240,6 +246,11 @@ def acquire_lock(paths: Paths, lock_timeout: float) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args)
+
+    # Step 6 (agents.md): a detached worker is a separate process that re-parses to its
+    # own code path below; the foreground launcher path is skipped when --launch is set.
+    if getattr(args, "launch", False):
+        return _worker(args)
     try:
         validate_args(args)
     except SetupError as exc:
@@ -259,13 +270,67 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("skip recent backup %s", newest)
         return 0
 
-    # Step 5 (agents.md): lock + skip-if-running. Briefly take the flock;
-    # the detached worker re-locks for the real critical section (§8).
+    # Step 5 (agents.md): lock + skip-if-running. Briefly take the flock; if a backup is
+    # already running, the launcher returns 20 without spawning a worker (§8).
     rc = acquire_lock(paths, args.lock_timeout)
     if rc != 0:
         return rc
-    logger.info("skeleton: wiring plan.md steps %s; see agents.md for the sequence",
-                ", ".join(_STEPS))
+    # Step 6 (agents.md): launch the detached worker, then return immediately. The worker
+    # (its own session, stdin from /dev/null, I/O to log_file) is the authority on
+    # skip-vs-create; the foreground fast-path above must agree with it.
+    if not _launch_worker(paths, args):
+        return 1
+    return 0
+
+
+def _launch_worker(paths: Paths, args: argparse.Namespace) -> bool:
+    """Step 6 (agents.md): spawn the detached worker and return 0 without waiting.
+
+    The child is a new session (start_new_session, the Python equivalent of setsid) with
+    stdin from /dev/null and stdout/stderr appended to log_file (the nohup role); it is the
+    authority on the backup and survives the launcher terminating its process group."""
+    script = sys.argv[0] if sys.argv[:1] else os.path.abspath(__file__)
+    cmd = [sys.executable, "-B", script, *sys.argv[1:], "--launch"]
+    try:
+        with open(paths.log_file, "ab") as log_stream:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+    except OSError as exc:
+        logger.error("cannot launch worker: %s", exc)
+        return False
+    _write_pid(paths.pid_path, proc.pid)
+    logger.info("launched worker pid=%s (skip-if-running logs to %s)", proc.pid, paths.log_file)
+    return True
+
+
+def _worker(args: argparse.Namespace) -> int:
+    """Step 6 real work (agents.md §7 onward). Re-acquire the lock for the critical section,
+    re-check the age gate (the worker is the authority), then build the archive. Steps 7-9
+    add archive/prune/notify; until then this is a minimal placeholder that still performs the
+    authoritative lock + age re-check so detach behavior is verifiable."""
+    configure_logging(args)
+    try:
+        paths = resolve_paths(args)
+    except SetupError as exc:
+        logger.error("setup failed: %s", exc)
+        return 2
+    logger.info("worker: re-checking age for backup_dir=%s under lock", paths.backup_dir)
+    rc = acquire_lock(paths, args.lock_timeout)
+    if rc != 0:
+        return rc  # 20: a backup is already running
+    newest = newest_backup(paths.backup_dir)
+    if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
+        logger.info("worker: skip recent backup %s", newest)
+        return 10
+    # Placeholder for the Steps 7-9 backup work (tar --zstd, prune, notify).
+    logger.info("worker: placeholder backup work (Steps 7-9 not yet implemented); simulating ~3s")
+    time.sleep(3.0)
     return 0
 
 
