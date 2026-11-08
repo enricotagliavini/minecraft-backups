@@ -109,11 +109,32 @@ def configure_logging(args: argparse.Namespace) -> None:
         format="%(asctime)s %(levelname)-7s %(message)s",
         handlers=handlers,
     )
+class SetupError(Exception):
+    """A foreground setup failure; the launcher sees a non-zero exit (§5)."""
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    """Reject invalid argument *values*; argparse already rejects invalid *types*.
+
+    This enforces the *range* so a value can actually be used, and raises
+    SetupError on failure so the caller logs it and exits non-zero (§5).
+    """
+    if args.keep < 1:
+        raise SetupError(f"--keep must be >= 1, got {args.keep}")
+    if args.max_age <= 0:
+        raise SetupError(f"--max-age must be > 0, got {args.max_age}")
+    if args.lock_timeout < 0:
+        raise SetupError(f"--lock-timeout must be >= 0, got {args.lock_timeout}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args)
+    try:
+        validate_args(args)
+    except SetupError as exc:
+        logger.error("invalid arguments: %s", exc)
+        return 2
     logger.info("skeleton: wiring plan.md steps %s; see agents.md for the sequence",
                 ", ".join(_STEPS))
     return 0
