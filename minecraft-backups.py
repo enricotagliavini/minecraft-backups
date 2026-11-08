@@ -18,6 +18,7 @@ order; the ``_STEPS`` markers below indicate where each belongs.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import glob
 import logging
 from collections import namedtuple
@@ -180,6 +181,62 @@ def newest_backup(backup_dir: str) -> str | None:
     return max(names, key=os.path.getmtime)
 
 
+def _read_pid(pid_path: str) -> int | None:
+    """Return the PID in pid_path, or None if unreadable/empty."""
+    try:
+        with open(pid_path) as fh:
+            return int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid(pid_path: str, pid: int) -> None:
+    """Record pid in pid_path, logging (once) if it cannot be written."""
+    try:
+        with open(pid_path, "w") as fh:
+            fh.write(str(pid))
+    except OSError as exc:
+        logger.warning("cannot write pidfile %s: %s", pid_path, exc)
+
+
+def acquire_lock(paths: Paths, lock_timeout: float) -> int:
+    """Take the flock on backup_dir/.lock (plan.md §8, Step 5).
+
+    Returns 0 when we now hold the lock; 20 when a backup is already running
+    (the lock stays held past ``lock_timeout``); 8 if the lock file cannot be
+    created. The holder records its PID in backup_dir/.pid.
+    """
+    try:
+        lock_fd = os.open(paths.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        logger.error("cannot open lock file %s: %s", paths.lock_path, exc)
+        return 8
+
+    pid = _read_pid(paths.pid_path)
+
+    deadline = time.time() + lock_timeout
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
+
+    if time.time() > deadline:
+        # A blocking timeout means a live process holds the lock; the OS
+        # releases flock on exit, so flock would succeed if the owner were dead.
+        logger.info("skip: backup already running (lock held %ss, pid=%s)",
+                    lock_timeout, pid)
+        os.close(lock_fd)
+        return 20
+    _write_pid(paths.pid_path, os.getpid())
+    logger.info("lock taken by pid %s (timeout %ss)", os.getpid(), lock_timeout)
+    os.close(lock_fd)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args)
@@ -201,6 +258,12 @@ def main(argv: list[str] | None = None) -> int:
     if newest is not None and now() - os.path.getmtime(newest) < DEFAULT_MAX_AGE_HOURS * 3600.0:
         logger.info("skip recent backup %s", newest)
         return 0
+
+    # Step 5 (agents.md): lock + skip-if-running. Briefly take the flock;
+    # the detached worker re-locks for the real critical section (§8).
+    rc = acquire_lock(paths, args.lock_timeout)
+    if rc != 0:
+        return rc
     logger.info("skeleton: wiring plan.md steps %s; see agents.md for the sequence",
                 ", ".join(_STEPS))
     return 0
