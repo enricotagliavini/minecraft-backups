@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Step 4 (agents.md): age gate — skip if the newest backup is younger than max_age.
     newest = newest_backup(paths.backup_dir)
-    if newest is not None and now() - os.path.getmtime(newest) < DEFAULT_MAX_AGE_HOURS * 3600.0:
+    if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
         logger.info("skip recent backup %s", newest)
         return 0
 
