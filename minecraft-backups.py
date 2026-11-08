@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections import namedtuple
+import os
 import sys
 import time
 
@@ -28,6 +30,7 @@ DEFAULT_MAX_AGE_HOURS = 24.0
 DEFAULT_KEEP = 5
 DEFAULT_LOCK_TIMEOUT_SECONDS = 60.0
 DEFAULT_BACKUP_DIR_SUFFIX = "backups"
+DEFAULT_LOG_FILE_NAME = "backup.log"
 
 logger = logging.getLogger(TOOL_NAME)
 
@@ -127,6 +130,40 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SetupError(f"--lock-timeout must be >= 0, got {args.lock_timeout}")
 
 
+Paths = namedtuple("Paths", "folder backup_dir log_file lock_path pid_path")
+
+
+def resolve_paths(args: argparse.Namespace) -> Paths:
+    """Resolve filesystem paths for this run (§3).
+
+    Computes backup_dir/log_file/lock/pid and raises SetupError (§5) when the
+    folder is unusable or the backup dir cannot be created.
+    """
+    folder = os.path.abspath(args.folder)
+    if not os.path.isdir(folder):
+        raise SetupError(f"folder is not a directory: {args.folder}")
+
+    if args.backup_dir:
+        backup_dir = os.path.abspath(args.backup_dir)
+    else:
+        parent = os.path.dirname(folder) or "."
+        backup_dir = os.path.join(parent, DEFAULT_BACKUP_DIR_SUFFIX)
+
+    if args.log_file:
+        log_file = os.path.abspath(args.log_file)
+    else:
+        log_file = os.path.join(backup_dir, DEFAULT_LOG_FILE_NAME)
+
+    lock_path = os.path.join(backup_dir, ".lock")
+    pid_path = os.path.join(backup_dir, ".pid")
+
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+    except OSError as exc:
+        raise SetupError(f"cannot create backup directory {backup_dir!r}: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args)
@@ -134,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
         validate_args(args)
     except SetupError as exc:
         logger.error("invalid arguments: %s", exc)
+        return 2
+    try:
+        paths = resolve_paths(args)
+    except SetupError as exc:
+        logger.error("setup failed: %s", exc)
         return 2
     logger.info("skeleton: wiring plan.md steps %s; see agents.md for the sequence",
                 ", ".join(_STEPS))
