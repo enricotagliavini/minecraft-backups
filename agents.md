@@ -26,8 +26,7 @@ agent-facing subset: how to work, what's allowed, and the exact step sequence.
 
 ## Conventions
 
-- Exit codes: foreground `0`=ok(non-zero=setup failed); worker `0`=created, `10`=skipped by age,
-  `20`=skipped because running, `1`=hard error, `2`=path/usage error. Keep these frozen.
+- Exit codes are frozen — see plan.md §5 (single source of truth); change only with a coordinated edit to both files.
 - Backup name: `<YYYYmmdd-HHMMSS>.<pid>.tar.zst`. Newest by mtime.
 - Log format: one line per action, e.g. `INFO skip recent backup /path` / `INFO created /path (<bytes>)` / `INFO prune removed /path`.
 - Keep files minimal and boring. No abstractions beyond what each step needs.
@@ -45,29 +44,9 @@ Per step:
 5. When a step's changes make an earlier helper obsolete, remove it (no dead code).
 
 ### Step-by-step
-
-- **1** Skeleton + conventions. Create `minecraft-backups.py` (with a `main()`), `README.md`.
-  Verify: `python3 minecraft-backups.py --help` prints usage listing all §3 options.
-- **2** argparse. Add all §3 options; `-f/--folder` required.
-  Verify: missing `-f` exits non-zero with a message; `--help` lists all flags/defaults.
-- **3** Path helpers + exit codes. `backup_dir`, `log_file`, `mkdir` parents, lock/pid paths.
-  Verify: wrong/missing folder → non-zero exit with a clear message; `backup_dir` computed as
-  `<parent>/backups`; `--backup-dir` overrides it.
-- **4** Age gate — folded into the ONE shared `_run` (§6). Newest-backup vs `now - max_age`; clock injectable.
-  Verify: a backup older than `--max-age` → `_run` proceeds; a recent backup → `_run` skips with exit `10`.
-  The foreground launcher does NOT do this check — it just spawns `_run` and returns `0`.
-- **5** Lock + skip-if-running. `fcntl.flock` on lock-file fd; stale-pid handling.
-  Verify: two foreground runs don't both create workers; second logs skip/`20`.
-- **6** Background launch. The foreground spawns the detached worker (`setsid` + `nohup`, redirect to log, `start_new_session=True`, write pidfile) and **returns `0` without waiting** — this is the launcher path. The spawned worker runs the SAME `_run` that `--detach-worker` runs inline.
-  Verify: `time python3 ... ` returns in well under a second while a `zstd`/slow worker is still running.
-- **7** Worker archive. Same ONE `_run` the foreground spawns — age re-check (Step 4, authoritative, skip=`10`) then build `<ts>.<pid>.<n>.part`, run `tar --zstd -C <folder> -cf <part> .` via `subprocess`; flush/close (fsync if supported); `os.replace(part, archive)` (atomic write — readers never see a partial file). Exit `0` created / `1` hard error. Verify: the detached worker produces a valid archive (`tar --zstd -t` and `zstd -t`). On failure, the `.part` is removed and NO `*.tar.zst` is left behind.
-- **8** Prune. List `*.tar.zst` newest-first; delete older than `keep`; also remove stale `.part` files; never delete the current archive by mtime (guard it by name).
-  Verify: create 7 (via injected mtimes), `--keep 5` deletes exactly 2; no `.part`/partial files remain.
-- **9** Completion. Emit `notify-send` only when the desktop session is detected (`XDG_SESSION_DESKTOP` set) AND the `notify-send` binary exists; otherwise skip silently (no error). No `--no-notify` option exists. Append a structured line to log_file; cleanup pidfile.
-  Verify: `XDG_SESSION_DESKTOP` set + binary present → `notify-send` fires; var unset → no notification, no error; missing binary → skip without error.
-- **10** Smoke test all paths (§7 in plan.md).
-  Verify the behaviors: return-fast, create, skip-by-age, prune, survive-parent-kill, desktop-gate.
-- **11** Docs. Final README pre-command string + troubleshooting.
+The authoritative step list, descriptions, and acceptance criteria live in `plan.md`
+§7 — the single source of truth. Agents.md only drives *how* each step is executed;
+it does not redefine what any step does.
 
 ## How to drive
 
