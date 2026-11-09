@@ -313,6 +313,88 @@ def _launch_worker(paths: Paths, args: argparse.Namespace) -> bool:
     logger.info("launched worker pid=%s (skip-if-running logs to %s)", proc.pid, paths.log_file)
     return True
 
+def _fsync_file(path: str) -> None:
+    """Flush a file's contents to disk before publishing it (Step 7); best-effort."""
+    try:
+        fd = os.open(path, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # not all filesystems support fsync; skipping is harmless
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path: str) -> None:
+    """fsync a directory so a rename-in is durable; best-effort."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _safe_remove(path: str) -> None:
+    """Remove a file, ignoring a missing file and logging once on other failure."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("cannot remove %s: %s", path, exc)
+
+
+def make_archive(run_paths: Paths, args: argparse.Namespace) -> int:
+    """Create one archive with ``tar --zstd``, then publish it atomically (Step 7).
+
+    The archive is named ``<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`` (written by tar) and then
+    ``os.replace``d to ``<...>.tar.zst`` — an atomic rename within the same directory, so a
+    reader never observes a partial ``*.tar.zst`` (§5 hygiene). On any failure the ``.part``
+    is removed first. Returns 0 on success, 1 on failure.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    ts = int(time.time())
+    base = f"{stamp}.{os.getpid()}.{ts}"
+    part = os.path.join(run_paths.backup_dir, f"{base}.part")
+    archive = os.path.join(run_paths.backup_dir, f"{base}.tar.zst")
+
+    try:
+        proc = subprocess.run(
+            ["tar", "--zstd", "-C", run_paths.folder, "-cf", part, "."],
+            check=False,
+        )
+    except OSError as exc:
+        logger.error("cannot run tar --zstd: %s", exc)
+        _safe_remove(part)
+        return 1
+
+    if proc.returncode != 0:
+        logger.error("tar --zstd failed (exit %s) for folder %s",
+                     proc.returncode, run_paths.folder)
+        _safe_remove(part)
+        return 1
+
+    # tar wrote the .part; flush it before the atomic rename so the published
+    # archive is complete and durable on disk.
+    _fsync_file(part)
+    try:
+        os.replace(part, archive)  # atomic rename within the same directory
+        _fsync_dir(run_paths.backup_dir)
+    except OSError as exc:
+        logger.error("cannot finalize archive %s: %s", archive, exc)
+        _safe_remove(part)
+        return 1
+
+    logger.info("archive created: %s", archive)
+    return 0
+
 
 def _run(run_paths: Paths, args: argparse.Namespace) -> int:
     """The single shared backup path (§6 + Steps 7-9).
@@ -330,7 +412,13 @@ def _run(run_paths: Paths, args: argparse.Namespace) -> int:
     if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
         logger.info("skip recent backup %s", newest)
         return 10
-    # Steps 7-9 (tar --zstd, prune, notify, pidfile cleanup): TODO.
+    # Steps 7-9: archive below; prune (Step 8) and notify + pidfile cleanup (Step 9) follow.
+    rc = make_archive(run_paths, args)
+    if rc != 0:
+        return rc  # Step 7 hygiene: the .part was removed, so no stray archive (§5 exit 1)
+    logger.info("backup created: %s", newest_backup(run_paths.backup_dir))
+    # Prune (Step 8) and notify + pidfile cleanup (Step 9) are next; this step leaves
+    # exactly one archive on disk.
     return 0
 
 

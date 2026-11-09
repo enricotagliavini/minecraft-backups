@@ -143,11 +143,12 @@ Create `minecraft-backups.py`, `plan.md`, `agents.md`, a `README.md`.
 - **Return 0 immediately**, do not `wait()`.
 - This is the crux of "don't block minecraft." Verify it returns at once.
 
-### Step 7 — Worker: re-check age + archive
+### Step 7 — Worker: re-check age + archive — DONE (verified)
 - Inside the locked critical section: re-check age (the ONE shared check — the same code the foreground relies on via the spawned worker). If recent → exit `10`.
 - Build the archive name `<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`, then run `tar --zstd -C <folder> -cf <part> .` via `subprocess`.
 - Flush + close the archive (fsync the file if supported), then `os.replace(part, archive)` — an atomic rename, so readers never see a partial file.
 - On any error: log, remove the `.part` file, exit `1`. On success: exit `0`, then continue to prune.
+- **Verified**: `_run` via `--detach-worker` (large max-age) → rc `0`, exactly one `<stamp>.<pid>.<ts>.tar.zst`, no `.part`; archive parses as a valid zstd tar with `./player.dat`, `./level.dat`. Tar failure (nonexistent folder) → rc `1`, no `.tar.zst`, no `.part`. `make_archive` wired into `_run` after the age gate; Steps 8/9 are pending placeholders.
 
 ### Step 8 — Worker: prune to keep N
 - List `*.tar.zst` newest-first; delete older than the `keep` newest.
