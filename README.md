@@ -69,7 +69,8 @@ gated on `XDG_SESSION_DESKTOP` and the presence of the `notify-send` binary.
 
 | Code | Meaning |
 |---|---|
-| `0` (foreground) | Setup OK — backup created, skipped, or not needed |
+| `0` (foreground) | Backup launched — returns immediately after spawning the detached worker (created or skipped) |
+| `20` (foreground) | Skipped — a backup is already running (skip-if-running) |
 | non-zero (foreground) | Setup failed (folder missing, tool/binaries unavailable, cannot create backup dir) |
 | `0` (worker) | Created a backup |
 | `10` (worker) | Skipped — a backup exists within `--max-age` |

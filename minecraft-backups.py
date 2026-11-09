@@ -171,6 +171,27 @@ def resolve_paths(args: argparse.Namespace) -> Paths:
         raise SetupError(f"cannot create backup directory {backup_dir!r}: {exc}") from exc
     return Paths(folder=folder, backup_dir=backup_dir, log_file=log_file, lock_path=lock_path, pid_path=pid_path)
 
+def setup(args: argparse.Namespace) -> Paths | None:
+    """Validate args and resolve paths for this run (§3 + §5).
+
+    Shared by the foreground launcher and the detached worker's `_run` (§6) so both
+    modes run identical setup. Returns Paths on success, or None if a SetupError was
+    caught (already logged by the caller, which exits 2).
+    """
+    try:
+        validate_args(args)
+    except SetupError as exc:
+        logger.error("setup failed: %s", exc)
+        return None
+    try:
+        paths = resolve_paths(args)
+    except SetupError as exc:
+        logger.error("setup failed: %s", exc)
+        return None
+    logger.info("resolved: folder=%s backup_dir=%s log_file=%s",
+                paths.folder, paths.backup_dir, paths.log_file)
+    return paths
+
 
 def newest_backup(backup_dir: str) -> str | None:
     """Path of the newest `*.tar.zst` in backup_dir by mtime, else None.
@@ -245,49 +266,34 @@ def acquire_lock(paths: Paths, lock_timeout: float) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args)
-
-    # Step 6 (agents.md): a detached worker is a separate process that re-parses to its
-    # own code path below; the foreground launcher path is skipped when --launch is set.
+    # Written here (setup) and checked here — the single place that resolves run_paths.
+    # Passed to _run(run_paths, args) so neither launch mode duplicates setup/check.
+    run_paths = setup(args)
+    if run_paths is None:
+        return 2
+    # --detach-worker / --background: this process is the setsid child the launcher
+    # spawned; run the shared backup path inline. Its exit code is meaningless — no one
+    # reads it (§5); the foreground path below keeps the real codes.
     if getattr(args, "launch", False):
-        return _worker(args)
-    try:
-        validate_args(args)
-    except SetupError as exc:
-        logger.error("invalid arguments: %s", exc)
-        return 2
-    try:
-        paths = resolve_paths(args)
-    except SetupError as exc:
-        logger.error("setup failed: %s", exc)
-        return 2
-    logger.info("resolved: folder=%s backup_dir=%s log_file=%s",
-                paths.folder, paths.backup_dir, paths.log_file)
-
-    # Step 4 (agents.md): age gate — skip if the newest backup is younger than max_age.
-    newest = newest_backup(paths.backup_dir)
-    if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
-        logger.info("skip recent backup %s", newest)
-        return 0
-
-    # Step 5 (agents.md): lock + skip-if-running. Briefly take the flock; if a backup is
-    # already running, the launcher returns 20 without spawning a worker (§8).
-    rc = acquire_lock(paths, args.lock_timeout)
+        return _run(run_paths, args)
+    # Skip-if-running (§8): briefly hold the flock. If a backup is already running, return
+    # 20 without spawning a second worker. Otherwise launch the detached worker (Step 6)
+    # and return immediately so the launcher can start minecraft.
+    rc = acquire_lock(run_paths, args.lock_timeout)
     if rc != 0:
         return rc
-    # Step 6 (agents.md): launch the detached worker, then return immediately. The worker
-    # (its own session, stdin from /dev/null, I/O to log_file) is the authority on
-    # skip-vs-create; the foreground fast-path above must agree with it.
-    if not _launch_worker(paths, args):
+    if not _launch_worker(run_paths, args):
         return 1
     return 0
 
 
 def _launch_worker(paths: Paths, args: argparse.Namespace) -> bool:
-    """Step 6 (agents.md): spawn the detached worker and return 0 without waiting.
+    """Spawn the detached worker and return without waiting.
 
     The child is a new session (start_new_session, the Python equivalent of setsid) with
-    stdin from /dev/null and stdout/stderr appended to log_file (the nohup role); it is the
-    authority on the backup and survives the launcher terminating its process group."""
+    stdin from /dev/null and stdout/stderr appended to log_file (the nohup role). It runs
+    the SAME _run(args) path as this foreground process, so the two launch modes stay
+    identical apart from the setsid; only this foreground process's exit code matters."""
     script = sys.argv[0] if sys.argv[:1] else os.path.abspath(__file__)
     cmd = [sys.executable, "-B", script, *sys.argv[1:], "--detach-worker"]
     try:
@@ -308,28 +314,23 @@ def _launch_worker(paths: Paths, args: argparse.Namespace) -> bool:
     return True
 
 
-def _worker(args: argparse.Namespace) -> int:
-    """Step 6 real work (agents.md §7 onward). Re-acquire the lock for the critical section,
-    re-check the age gate (the worker is the authority), then build the archive. Steps 7-9
-    add archive/prune/notify; until then this is a minimal placeholder that still performs the
-    authoritative lock + age re-check so detach behavior is verifiable."""
-    configure_logging(args)
-    try:
-        paths = resolve_paths(args)
-    except SetupError as exc:
-        logger.error("setup failed: %s", exc)
-        return 2
-    logger.info("worker: re-checking age for backup_dir=%s under lock", paths.backup_dir)
-    rc = acquire_lock(paths, args.lock_timeout)
+def _run(run_paths: Paths, args: argparse.Namespace) -> int:
+    """The single shared backup path (§6 + Steps 7-9).
+
+    Runs in the foreground of THIS process. With --detach-worker this process is the
+    setsid child the foreground spawned, so a background and a foreground invocation
+    share this exact code apart from the setsid. Holds the flock for the whole job; a
+    second caller (or the foreground's pre-spawn check) is skipped via acquire_lock."""
+    rc = acquire_lock(run_paths, args.lock_timeout)
     if rc != 0:
         return rc  # 20: a backup is already running
-    newest = newest_backup(paths.backup_dir)
+
+    # Age gate — authoritative (§4). Skip if a backup exists within max_age.
+    newest = newest_backup(run_paths.backup_dir)
     if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
-        logger.info("worker: skip recent backup %s", newest)
+        logger.info("skip recent backup %s", newest)
         return 10
-    # Placeholder for the Steps 7-9 backup work (tar --zstd, prune, notify).
-    logger.info("worker: placeholder backup work (Steps 7-9 not yet implemented); simulating ~3s")
-    time.sleep(3.0)
+    # Steps 7-9 (tar --zstd, prune, notify, pidfile cleanup): TODO.
     return 0
 
 

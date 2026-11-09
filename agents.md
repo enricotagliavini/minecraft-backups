@@ -19,7 +19,8 @@ agent-facing subset: how to work, what's allowed, and the exact step sequence.
 - Python **standard library only**. No pip, no `import` that requires a dnf package.
 - One file does the whole job: `minecraft-backups.py`.
 - The launcher command must return quickly. Never block the foreground on the archive.
-- The detached worker is the authority on skip-vs-create; the foreground fast-path must agree.
+- Background and foreground share the SAME `_run` code; only setsid-detached vs
+ inline differ, and the background (worker) return code is never read.
 - Deterministic tests: inject the clock (e.g. `now()` module-level with default `time.time()`)
   so age tests don't depend on real time.
 
@@ -52,16 +53,14 @@ Per step:
 - **3** Path helpers + exit codes. `backup_dir`, `log_file`, `mkdir` parents, lock/pid paths.
   Verify: wrong/missing folder → non-zero exit with a clear message; `backup_dir` computed as
   `<parent>/backups`; `--backup-dir` overrides it.
-- **4** Age gate. Newest-backup vs `now - max_age`. Clock injectable for tests.
-  Verify: with a backup older than max_age → proceeds; with a recent backup → exits `0` (skip).
-  Inject a file mtime in the future/past to force both cases deterministically.
+- **4** Age gate — folded into the ONE shared `_run` (§6). Newest-backup vs `now - max_age`; clock injectable.
+  Verify: a backup older than `--max-age` → `_run` proceeds; a recent backup → `_run` skips with exit `10`.
+  The foreground launcher does NOT do this check — it just spawns `_run` and returns `0`.
 - **5** Lock + skip-if-running. `fcntl.flock` on lock-file fd; stale-pid handling.
   Verify: two foreground runs don't both create workers; second logs skip/`20`.
-- **6** Background launch. `setsid` + `nohup`, redirect to log, `start_new_session=True`,
-  pidfile, **return 0 without waiting**.
+- **6** Background launch. The foreground spawns the detached worker (`setsid` + `nohup`, redirect to log, `start_new_session=True`, write pidfile) and **returns `0` without waiting** — this is the launcher path. The spawned worker runs the SAME `_run` that `--detach-worker` runs inline.
   Verify: `time python3 ... ` returns in well under a second while a `zstd`/slow worker is still running.
-- **7** Worker archive. Re-check age inside the lock; build `<ts>.<pid>.<n>.part`, run `tar --zstd -C <folder> -cf <part> .` via `subprocess`; flush/close (fsync if supported); `os.replace(part, archive)` (atomic write — readers never see a partial file). Exit `0` created / `1` hard error.
-  Verify: after the foreground returns, the worker produces a valid archive (`tar --zstd -t` and `zstd -t`). On failure, the `.part` is removed and NO `*.tar.zst` is left behind.
+- **7** Worker archive. Same ONE `_run` the foreground spawns — age re-check (Step 4, authoritative, skip=`10`) then build `<ts>.<pid>.<n>.part`, run `tar --zstd -C <folder> -cf <part> .` via `subprocess`; flush/close (fsync if supported); `os.replace(part, archive)` (atomic write — readers never see a partial file). Exit `0` created / `1` hard error. Verify: the detached worker produces a valid archive (`tar --zstd -t` and `zstd -t`). On failure, the `.part` is removed and NO `*.tar.zst` is left behind.
 - **8** Prune. List `*.tar.zst` newest-first; delete older than `keep`; also remove stale `.part` files; never delete the current archive by mtime (guard it by name).
   Verify: create 7 (via injected mtimes), `--keep 5` deletes exactly 2; no `.part`/partial files remain.
 - **9** Completion. Emit `notify-send` only when the desktop session is detected (`XDG_SESSION_DESKTOP` set) AND the `notify-send` binary exists; otherwise skip silently (no error). No `--no-notify` option exists. Append a structured line to log_file; cleanup pidfile.

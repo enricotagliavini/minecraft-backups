@@ -18,7 +18,7 @@ Target: Fedora 44, unprivileged user, GUI desktop (notify-send).
 | Backup dir | `<parent-of-folder>/backups`; override with `--backup-dir` | Matches "one level up, called backups" |
 | Return semantics | 0 if *setup* succeeded (backup created/skipped/already-running); non-zero only if setup itself failed | Backup runs in background regardless; blocking on archive outcome would defeat the whole point |
 | Notification & hygiene | `notify-send` on completion; auto-gated by `XDG_SESSION_DESKTOP` + binary presence; archives atomic (never partial) |
-| Concurrency | `flock`-guarded worker + pidfile; a second concurrent run skips | Launcher clicks twice, or foreground fast-check races the worker |
+| Concurrency | `flock`-guarded worker + pidfile; a second concurrent run skips | Launcher clicks twice, or a second run skips while the worker holds the lock |
 
 ---
 
@@ -35,7 +35,8 @@ Target: Fedora 44, unprivileged user, GUI desktop (notify-send).
 
 - Launcher pre-command = our script. Script must **return quickly** so the launcher starts minecraft.
 - The real work (age-check, `tar --zstd`, prune, `notify-send`) runs in a **detached** session that survives the launcher terminating the pre-command's process group.
-- The detached worker is the **authority** on skip-vs-create; the foreground does a fast pre-check for UX. A lock serializes real work.
+- Background and foreground share the SAME `_run` code (only setsid-detached vs inline differ).
+ The background worker is the **authority** on skip-vs-create; the lock serializes real work.
 
 ---
 
@@ -80,34 +81,29 @@ minecraft-backups/
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant L as Launcher
     participant S as minecraft-backups.py (foreground)
-    participant W as setsid worker (detached)
+    participant W as setsid worker — runs _run
     participant F as filesystem
 
     L->>S run script --folder <dir>
     S->>S resolve paths / args
-    alt recent backup within max-age
-        S->>F log "skip"
-        S-->>L return 0      # launcher starts minecraft
-    else no recent backup
-        S->>S check lock/pidfile
-        alt another run in progress
-            S->>F log "skip: running"
-            S-->>L return 20
-        else lock free
-            S->>S setsid nohup python3 worker &
-            S->>F write pidfile
-            S-->>L return 0   # returns immediately
-        end
+    S->>S check lock briefly: another run in progress → return 20
+    alt lock free
+        S->>W setsid nohup python3 … --detach-worker &
+        S->>F write pidfile
+        S-->>L return 0     # launches, returns immediately so minecraft starts
     end
 
-    W->>W flock (blocks if busy)
-    W->>W re-check age
-    W->>F tar --zstd -> archive
-    W->>F prune to keep N
-    W->>F notify-send result
-    W-->>F remove pidfile
+    Note over W: ONE shared _run — this is also what `--detach-worker` runs inline
+    W->>W age gate: newest vs now - max_age → skip (exit 10) if recent
+    alt no recent backup
+        W->>F tar --zstd -> archive
+        W->>W prune to keep N
+        W->>F notify-send result
+        W-->>L done (exit 0)
+    end
 ```
 
 ---
@@ -132,9 +128,9 @@ Create `minecraft-backups.py`, `plan.md`, `agents.md`, a `README.md`.
 - `mkdir -p` backup_dir/log_file's parents. Fail (non-zero) if impossible.
 - Lock-file path = backup_dir/.lock; pid-file path = backup_dir/.pid.
 
-### Step 4 — Age gate (foreground fast-path)
+### Step 4 — Age gate (inside the shared `_run`)
 - Find newest backup in `backup_dir` (`*.tar.zst`, mtime).
-- If `now - mtime < max_age` → log skip, exit `0`.
+- If `now - mtime < max_age` → log skip, exit `10`; else proceed. The SAME `_run` is the background worker's real work, so the foreground launcher never checks age — it spawns `_run` and returns `0`.
 - Unit: deterministic by overriding the clock (inject `now` via a module-level function defaulting to `time.time()`).
 
 ### Step 5 — Locking + skip-if-running
@@ -142,13 +138,13 @@ Create `minecraft-backups.py`, `plan.md`, `agents.md`, a `README.md`.
 - If a worker is running (pidfile alive, or lock held) and older than `lock-timeout` → log skip, exit `20`.
 
 ### Step 6 — Background launch (foreground returns fast)
-- Spawn the worker **detached**: `setsid` into a new session + `nohup`, redirect to log_file, `start_new_session=True`.
+- Spawn the worker **detached**: `setsid` into a new session + `nohup`, redirect to log_file, `start_new_session=True`. The spawned worker runs the SAME `_run` that `--detach-worker` runs inline.
 - Write pidfile with child PID.
 - **Return 0 immediately**, do not `wait()`.
 - This is the crux of "don't block minecraft." Verify it returns at once.
 
 ### Step 7 — Worker: re-check age + archive
-- Inside the locked critical section: re-check age (authoritative). If recent → exit `10`.
+- Inside the locked critical section: re-check age (the ONE shared check — the same code the foreground relies on via the spawned worker). If recent → exit `10`.
 - Build the archive name `<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`, then run `tar --zstd -C <folder> -cf <part> .` via `subprocess`.
 - Flush + close the archive (fsync the file if supported), then `os.replace(part, archive)` — an atomic rename, so readers never see a partial file.
 - On any error: log, remove the `.part` file, exit `1`. On success: exit `0`, then continue to prune.
