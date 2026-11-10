@@ -24,6 +24,7 @@ import logging
 from collections import namedtuple
 import os
 import sys
+import re
 import subprocess
 import time
 
@@ -46,7 +47,7 @@ _STEPS = [
     "5 locking + skip-if-running",
     "6 background launch",
     "7 worker archive",
-    "8 prune",
+    "8 prune (done)",
     "9 completion + logging",
     "10 smoke test",
     "11 docs + launcher integration",
@@ -341,23 +342,25 @@ def _fsync_dir(path: str) -> None:
         os.close(fd)
 
 
-def _safe_remove(path: str) -> None:
-    """Remove a file, ignoring a missing file and logging once on other failure."""
+def _safe_remove(path: str) -> bool:
+    """Best-effort remove: True if absent or removed, False on another error."""
     try:
         os.remove(path)
     except FileNotFoundError:
-        pass
+        return True
     except OSError as exc:
         logger.warning("cannot remove %s: %s", path, exc)
+        return False
+    return True
 
 
-def make_archive(run_paths: Paths, args: argparse.Namespace) -> int:
+def make_archive(run_paths: Paths, args: argparse.Namespace) -> tuple[int, str]:
     """Create one archive with ``tar --zstd``, then publish it atomically (Step 7).
 
     The archive is named ``<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`` (written by tar) and then
     ``os.replace``d to ``<...>.tar.zst`` — an atomic rename within the same directory, so a
     reader never observes a partial ``*.tar.zst`` (§5 hygiene). On any failure the ``.part``
-    is removed first. Returns 0 on success, 1 on failure.
+    is removed first. Returns `(0, archive_path)` on success, `(1, None)` on failure.
     """
     stamp = time.strftime("%Y%m%d-%H%M%S")
     ts = int(time.time())
@@ -373,13 +376,13 @@ def make_archive(run_paths: Paths, args: argparse.Namespace) -> int:
     except OSError as exc:
         logger.error("cannot run tar --zstd: %s", exc)
         _safe_remove(part)
-        return 1
+        return 1, None
 
     if proc.returncode != 0:
         logger.error("tar --zstd failed (exit %s) for folder %s",
                      proc.returncode, run_paths.folder)
         _safe_remove(part)
-        return 1
+        return 1, None
 
     # tar wrote the .part; flush it before the atomic rename so the published
     # archive is complete and durable on disk.
@@ -390,9 +393,50 @@ def make_archive(run_paths: Paths, args: argparse.Namespace) -> int:
     except OSError as exc:
         logger.error("cannot finalize archive %s: %s", archive, exc)
         _safe_remove(part)
-        return 1
+        return 1, None
 
     logger.info("archive created: %s", archive)
+    return 0, archive
+
+
+# Archive/part names embed their creation time: <YYYYmmdd-HHMMSS>.<pid>.<ts>,
+# then .tar.zst or .part. Matching only these exact shapes means prune deletes
+# nothing but our own archives (never a stray file of the same glob prefix).
+_ARCHIVE_RE = re.compile(r"^\d{8}-\d{6}\.\d+\.\d+\.tar\.zst$")
+_PART_RE = re.compile(r"^\d{8}-\d{6}\.\d+\.\d+\.part$")
+
+
+def _list_matches(bucket: str, regex: re.Pattern) -> list[str]:
+    """List full paths of `bucket` entries whose basename matches `regex` (anchored) — never a bare glob."""
+    return [os.path.join(bucket, n) for n in os.listdir(bucket) if regex.match(n)]
+
+
+def prune_dir(backup_dir: str, keep: int, exclude: str | None = None) -> int:
+    """Keep the `keep` newest ``*.tar.zst`` archives and clear stale ``*.part`` files.
+
+    Deletions are matched by name pattern only, so a stray file of the same glob prefix
+    is left alone. The current archive (`exclude`) is never removed, even if a rename
+    left it with a stale mtime (§8 hygiene). Best-effort: a failed removal is logged and
+    prune continues; the function always returns 0 so it never blocks a backup.
+    """
+    if keep < 1:
+        keep = 1  # never prune the just-created archive
+    if exclude is not None:
+        exclude = os.path.normpath(exclude)
+
+    removed = 0
+    archives = _list_matches(backup_dir, _ARCHIVE_RE)
+    archives.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for old in archives[keep:]:
+        if old != exclude and _safe_remove(old):
+            removed += 1
+    for part in _list_matches(backup_dir, _PART_RE):
+        if _safe_remove(part):
+            removed += 1
+    if removed:
+        kept = min(keep, len(archives))
+        logger.info("pruned %d archive(s); keeping %d newest (%s)",
+                    removed, kept, newest_backup(backup_dir))
     return 0
 
 
@@ -412,13 +456,14 @@ def _run(run_paths: Paths, args: argparse.Namespace) -> int:
     if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
         logger.info("skip recent backup %s", newest)
         return 10
-    # Steps 7-9: archive below; prune (Step 8) and notify + pidfile cleanup (Step 9) follow.
-    rc = make_archive(run_paths, args)
+    # Steps 7-9: archive below, then prune (Step 8); notify + pidfile cleanup (Step 9) follow.
+    rc, archive = make_archive(run_paths, args)
     if rc != 0:
         return rc  # Step 7 hygiene: the .part was removed, so no stray archive (§5 exit 1)
     logger.info("backup created: %s", newest_backup(run_paths.backup_dir))
-    # Prune (Step 8) and notify + pidfile cleanup (Step 9) are next; this step leaves
-    # exactly one archive on disk.
+    # Step 8: drop older archives beyond `keep`; guard the just-created archive by name.
+    prune_dir(run_paths.backup_dir, args.keep, exclude=archive)
+    # Notify (Step 9) + pidfile cleanup are next; this step leaves the keep-newest set.
     return 0
 
 
