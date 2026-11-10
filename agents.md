@@ -27,8 +27,10 @@ agent-facing subset: how to work, what's allowed, and the exact step sequence.
 ## Conventions
 
 - Exit codes are frozen — see plan.md §5 (single source of truth); change only with a coordinated edit to both files.
-- Backup name: `<YYYYmmdd-HHMMSS>.<pid>.tar.zst`. Newest by mtime.
-- Log format: one line per action, e.g. `INFO skip recent backup /path` / `INFO created /path (<bytes>)` / `INFO prune removed /path`.
+    - Backup name: ``<YYYY-mm-dd_HH-MM-SS>.<pid>.<ts>.tar.zst`` (``.part`` during tar).
+      Newest by the name-stamp prefix (fixed-width, lexically == chronologically), never mtime.
+    - Log format: one line per action, e.g. `INFO skip recent backup /path` / `INFO created /path (<bytes>)` /
+      `INFO pruned N archive(s); keeping M newest (name)`.
 - Keep files minimal and boring. No abstractions beyond what each step needs.
 
 ## Step sequence

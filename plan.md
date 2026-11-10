@@ -14,7 +14,7 @@ Target: Fedora 44, unprivileged user, GUI desktop (notify-send).
 | Archiving | `tar --zstd` (Linux tool) | User's explicit preference; GNU tar 1.35 on F44 supports it (verified) |
 | "Don't block minecraft" | Foreground script **backgrounds** the heavy work with `setsid` + `nohup`, writes pidfile, returns 0 immediately | Launchers expect the pre-command to finish fast. Detach = survives launcher killing the process group when the pre-command returns |
 | Age gate | Newest backup mtime vs `now - max-age`; else skip | Meets the "no backup if <24h" rule |
-| Retention | Keep newest `N`; delete the rest by mtime | Meets "last 5" |
+| Retention | Keep the `keep` newest, ranked by name-stamp prefix (fixed-width); also clear stale `.part` | Ranks by filename, not mtime — so a reshuffled dir can't pick the wrong set (§8) |
 | Backup dir | `<parent-of-folder>/backups`; override with `--backup-dir` | Matches "one level up, called backups" |
 | Return semantics | 0 if *setup* succeeded (backup created/skipped/already-running); non-zero only if setup itself failed | Backup runs in background regardless; blocking on archive outcome would defeat the whole point |
 | Notification & hygiene | `notify-send` on completion; auto-gated by `XDG_SESSION_DESKTOP` + binary presence; archives atomic (never partial) |
@@ -145,14 +145,17 @@ Create `minecraft-backups.py`, `plan.md`, `agents.md`, a `README.md`.
 
 ### Step 7 — Worker: re-check age + archive — DONE (verified)
 - Inside the locked critical section: re-check age (the ONE shared check — the same code the foreground relies on via the spawned worker). If recent → exit `10`.
-- Build the archive name `<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`, then run `tar --zstd -C <folder> -cf <part> .` via `subprocess`.
+- Build the archive name `<YYYY-mm-dd_HH-MM-SS>.<pid>.<ts>.part`, then run `tar --zstd -C <folder> -cf <part> .` via `subprocess`.
 - Flush + close the archive (fsync the file if supported), then `os.replace(part, archive)` — an atomic rename, so readers never see a partial file.
 - On any error: log, remove the `.part` file, exit `1`. On success: exit `0`, then continue to prune.
-- **Verified**: `_run` via `--detach-worker` (large max-age) → rc `0`, exactly one `<stamp>.<pid>.<ts>.tar.zst`, no `.part`; archive parses as a valid zstd tar with `./player.dat`, `./level.dat`. Tar failure (nonexistent folder) → rc `1`, no `.tar.zst`, no `.part`. `make_archive` wired into `_run` after the age gate; Steps 8/9 are pending placeholders.
+- **Verified**: `_run` via `--detach-worker` (large max-age) → rc `0`, exactly one `<YYYY-mm-dd_HH-MM-SS>.<pid>.<ts>.tar.zst`, no `.part`; archive parses as a valid zstd tar with `./player.dat`, `./level.dat`. Tar failure (nonexistent folder) → rc `1`, no `.tar.zst`, no `.part`. `make_archive` wired into `_run` after the age gate; Step 8 is implemented and verified (see below).
 
-### Step 8 — Worker: prune to keep N
-- List `*.tar.zst` newest-first; delete older than the `keep` newest.
-- Also remove any stale `.part` files; never delete the current archive by mtime (guard it by name).
+### Step 8 — Worker: prune to keep N — DONE (verified)
+- Rank `*.tar.zst` by name-stamp prefix `YYYY-mm-dd_HH-MM-SS` (fixed-width, so lexical == chronological), never by mtime — a reshuffled/copy-reshuffled dir can't fool the selection (§8).
+- Keep the `keep` newest; delete the rest, guarding the just-created archive (`exclude`) by name so the atomic `os.replace` can't evict it.
+- Also clear stale `.part` files, matched by the exact `stamp.pid.ts.part` shape (never a same-prefix `.zst.stale` stray — anchored regex).
+- Best-effort: a failed removal is logged; prune always returns 0 so it never blocks a backup.
+- **Verified**: 5 archives with mtimes in REVERSE name order — `prune_dir(keep=3)` keeps the 3 newest BY NAME plus the name-excluded oldest, deletes only the middle one, clears a planted `.part`, leaves a same-prefix `.zst.stale` untouched. Guarded by permanent test `test_prune_keeps_newest_by_name_not_mtime`.
 
 ### Step 9 — Worker: completion + logging
 - Emit `notify-send` summary (created/skipped/failed) only when the desktop session is detected (`XDG_SESSION_DESKTOP` set) and the `notify-send` binary exists; otherwise skip silently (no error).
@@ -164,7 +167,7 @@ Drive the script end-to-end with a fake slow folder:
 1. Return-immediately: launch, confirm foreground returns fast while worker runs.
 2. Create: after worker logs, confirm `*.tar.zst` exists, verify with `tar --zstd -t` and `zstd -t`.
 3. Skip by age: `--max-age 0` should skip when a recent backup exists.
-4. Prune: create 7 backups (touch old mtimes), `--keep 5` deletes 2.
+4. Prune: create 5 archives with name-stamps spanning a range, set their mtimes in REVERSE name order (oldest name = newest mtime), then `--keep 3` keeps the 3 newest BY NAME (n3,n4,n5) plus the name-excluded n1 and deletes only n2 — proving name ranking, not mtime; also clears a planted `.part` and leaves a same-prefix `.zst.stale` stray untouched.
 5. Detach survives: launch parent, then kill parent — child still alive and worker done.
 6. Desktop + notify: confirm `notify-send` fires only when `XDG_SESSION_DESKTOP` is set and the `notify-send` binary exists (unset the var → no notification, no error; missing binary → skip).
 6b. Hygiene: a failed `tar` leaves **no** `*.tar.zst` behind — only a removed `.part`/nothing.

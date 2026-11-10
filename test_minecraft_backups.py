@@ -191,3 +191,31 @@ def test_held_lock_exits_20(tmp_path):
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+# --- prune_dir (Step 8, §8 hygiene) ------------------------------------------
+
+
+def test_prune_keeps_newest_by_name_not_mtime(tmp_path):
+    # Name and mtime are on purpose in OPPOSITE order: n1 has the newest mtime,
+    # n5 the oldest. Only name-based sorting keeps the newest-by-name set, so a
+    # revert to mtime ranking fails here.
+    bd = tmp_path / "backups"
+    bd.mkdir()
+    names = [f"2026-0{d}-01_00-00-00.1.{d}.tar.zst" for d in (1, 2, 3, 4, 5)]
+    mtimes = {n: 1_000_000 + (5 - i) * 1000 for i, n in enumerate(names)}
+    for n in names:
+        open(bd / n, "wb").write(b"x")
+        os.utime(str(bd / n), (mtimes[n], mtimes[n]))
+    # tar's leftover .part, plus a stray file that shares our archive name prefix.
+    open(bd / "2026-03-15_12-30-45.9.1.part", "wb").write(b"x")
+    stray = bd / "2026-06-01_00-00-00.2.99999.tar.zst.stale"
+    open(stray, "wb").write(b"x")
+
+    # keep=3 by name keeps n3,n4,n5; n1 is protected via exclude, so n2 is the
+    # only archive deleted (mtime-based sorting would keep n1,n2,n3 instead).
+    assert mb.prune_dir(str(bd), keep=3, exclude=str(bd / names[0])) == 0
+    kept = {n for n in names if (bd / n).exists()}
+    assert kept == {names[2], names[3], names[4], names[0]}
+    assert not (bd / names[1]).exists()
+    assert not (bd / "2026-03-15_12-30-45.9.1.part").exists()
+    assert stray.exists()  # hygiene: same prefix, different suffix -> untouched

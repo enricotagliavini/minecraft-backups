@@ -357,12 +357,12 @@ def _safe_remove(path: str) -> bool:
 def make_archive(run_paths: Paths, args: argparse.Namespace) -> tuple[int, str]:
     """Create one archive with ``tar --zstd``, then publish it atomically (Step 7).
 
-    The archive is named ``<YYYYmmdd-HHMMSS>.<pid>.<ts>.part`` (written by tar) and then
+    The archive is named ``<YYYY-mm-dd_HH-MM-SS>.<pid>.<ts>.part`` (written by tar) and then
     ``os.replace``d to ``<...>.tar.zst`` — an atomic rename within the same directory, so a
     reader never observes a partial ``*.tar.zst`` (§5 hygiene). On any failure the ``.part``
     is removed first. Returns `(0, archive_path)` on success, `(1, None)` on failure.
     """
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     ts = int(time.time())
     base = f"{stamp}.{os.getpid()}.{ts}"
     part = os.path.join(run_paths.backup_dir, f"{base}.part")
@@ -399,16 +399,27 @@ def make_archive(run_paths: Paths, args: argparse.Namespace) -> tuple[int, str]:
     return 0, archive
 
 
-# Archive/part names embed their creation time: <YYYYmmdd-HHMMSS>.<pid>.<ts>,
+
+# Archive/part names embed their creation time: <YYYY-mm-dd_HH-MM-SS>.<pid>.<ts>,
 # then .tar.zst or .part. Matching only these exact shapes means prune deletes
 # nothing but our own archives (never a stray file of the same glob prefix).
-_ARCHIVE_RE = re.compile(r"^\d{8}-\d{6}\.\d+\.\d+\.tar\.zst$")
-_PART_RE = re.compile(r"^\d{8}-\d{6}\.\d+\.\d+\.part$")
+_ARCHIVE_RE = re.compile(r"^(?P<stamp>\d{4}-\d{2}-\d{2}_(?:\d{2}-\d{2}-\d{2}))\.\d+\.\d+\.tar\.zst$")
+_PART_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_(?:\d{2}-\d{2}-\d{2})\.\d+\.\d+\.part$")
 
 
 def _list_matches(bucket: str, regex: re.Pattern) -> list[str]:
     """List full paths of `bucket` entries whose basename matches `regex` (anchored) — never a bare glob."""
     return [os.path.join(bucket, n) for n in os.listdir(bucket) if regex.match(n)]
+
+
+def _archive_stamp(name: str) -> str | None:
+    """The `YYYY-mm-dd_HH-MM-SS` prefix of an archive name, or None for a stray.
+
+    Fields are fixed-width and zero-padded, so this string's lexical order IS
+    its chronological order; prune ranks by it and never by mtime (§8).
+    """
+    m = _ARCHIVE_RE.match(os.path.basename(name))
+    return m.group("stamp") if m else None
 
 
 def prune_dir(backup_dir: str, keep: int, exclude: str | None = None) -> int:
@@ -426,7 +437,7 @@ def prune_dir(backup_dir: str, keep: int, exclude: str | None = None) -> int:
 
     removed = 0
     archives = _list_matches(backup_dir, _ARCHIVE_RE)
-    archives.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    archives.sort(key=_archive_stamp, reverse=True)
     for old in archives[keep:]:
         if old != exclude and _safe_remove(old):
             removed += 1
