@@ -7,16 +7,14 @@ agent-facing subset: how to work, what's allowed, and the exact step sequence.
 
 ## Environment (verified on this machine)
 
-- Fedora 44, user `enrico`, **no root**.
+- Fedora 44, as user, **no root**.
 - `tar` (GNU tar 1.35, `--zstd` works), `zstd`, `notify-send`, `flock`, `setsid`, `nohup` present.
 - `python3` 3.14.10, `/usr/bin/python3`.
-- **No third-party packages are required.** Do not install anything via `dnf`. If a binary
-  were missing, the only Fedora package that could matter is `tar` (for `--zstd`); note it,
-  do not install.
+- **If additional packages are required ask the user.** Do not install anything without prompting the user first.
 
 ## Hard constraints
 
-- Python **standard library only**. No pip, no `import` that requires a dnf package.
+- Python **standard library only**. If optional extra python libraries are required, prompt the user.
 - One file does the whole job: `minecraft-backups.py`.
 - The launcher command must return quickly. Never block the foreground on the archive.
 - Background and foreground share the SAME `_run` code; only setsid-detached vs
@@ -31,7 +29,7 @@ agent-facing subset: how to work, what's allowed, and the exact step sequence.
       Newest by the name-stamp prefix (fixed-width, lexically == chronologically), never mtime.
     - Log format: one line per action, e.g. `INFO skip recent backup /path` / `INFO created /path (<bytes>)` /
       `INFO pruned N archive(s); keeping M newest (name)`.
-- Keep files minimal and boring. No abstractions beyond what each step needs.
+- Keep files minimal and efficient. No abstractions beyond what each step needs.
 
 ## Step sequence
 
@@ -44,6 +42,7 @@ Per step:
 3. If a step fails to verify, stop and report the exact failure; do not guess a fix.
 4. Do not implement, refactor, or expand scope beyond the current step.
 5. When a step's changes make an earlier helper obsolete, remove it (no dead code).
+6. If you find bug / defects from previous steps, report them to the user.
 
 ### Step-by-step
 The authoritative step list, descriptions, and acceptance criteria live in `plan.md`
@@ -53,5 +52,4 @@ it does not redefine what any step does.
 ## How to drive
 
 - Report each step's result with concrete evidence (command + observed output), not adjectives.
-- Ask (via `ask`) only for the open questions in `plan.md §9` if the user needs to choose; otherwise proceed with the default/boring choice.
 - Never write code for a step the user hasn't approved; wait for the next prompt.
