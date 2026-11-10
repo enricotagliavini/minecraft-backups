@@ -231,14 +231,15 @@ def acquire_lock(paths: Paths, lock_timeout: float) -> int:
     """Take the flock on backup_dir/.lock (plan.md §8, Step 5).
 
     Returns 0 when we now hold the lock; 20 when a backup is already running
-    (the lock stays held past ``lock_timeout``); 8 if the lock file cannot be
-    created. The holder records its PID in backup_dir/.pid.
+    (the lock stays held past ``lock_timeout``); 2 when it is a path/usage error:
+    the lock file (backup_dir/.lock) cannot be created because the backup dir is not
+    writable. The holder records its PID in backup_dir/.pid.
     """
     try:
         lock_fd = os.open(paths.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     except OSError as exc:
         logger.error("cannot open lock file %s: %s", paths.lock_path, exc)
-        return 8
+        return 2
 
     pid = _read_pid(paths.pid_path)
 

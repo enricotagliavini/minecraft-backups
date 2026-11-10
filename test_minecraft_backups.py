@@ -192,6 +192,18 @@ def test_held_lock_exits_20(tmp_path):
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
+def test_unwritable_dir_locks_path_usage_error(tmp_path):
+    # §5: a path/usage error must be code 2, never a raw OS errno. If the backup
+    # dir isn't writable, the lock file can't be created -> code 2 (not 8).
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    os.chmod(paths.backup_dir, 0o555)
+    try:
+        assert mb.acquire_lock(paths, lock_timeout=1.0) == 2
+    finally:
+        os.chmod(paths.backup_dir, 0o755)
+
 # --- prune_dir (Step 8, §8 hygiene) ------------------------------------------
 
 
