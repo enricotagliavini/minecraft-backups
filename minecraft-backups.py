@@ -25,6 +25,7 @@ from collections import namedtuple
 import os
 import sys
 import re
+import shutil
 import subprocess
 import time
 
@@ -451,6 +452,42 @@ def prune_dir(backup_dir: str, keep: int, exclude: str | None = None) -> int:
     return 0
 
 
+def _completion_summary(rc: int) -> str:
+    """Human label for the §5 worker code, for notify-send and log lines."""
+    return {
+        0: "backup created",
+        10: "skipped (recent backup)",
+        20: "skipped (a backup is already running)",
+        1: "hard error",
+        2: "path/usage error",
+    }.get(rc, f"exited with code {rc}")
+
+
+def notify_completion(rc: int, archive: str | None, newest: str | None) -> None:
+    """Gated desktop notify-send on completion (§9).
+
+    Fires only when the desktop session is detected (XDG_SESSION_DESKTOP set) and the
+    notify-send binary exists; otherwise the summary is skipped silently (no error).
+    """
+    binary = shutil.which("notify-send")
+    if binary is None or not os.environ.get("XDG_SESSION_DESKTOP"):
+        return
+    message = f"{TOOL_NAME}: {_completion_summary(rc)}"
+    if archive:
+        message += f" - {archive}"
+    elif newest:
+        message += f" - {newest}"
+    try:
+        subprocess.run([binary, "-t", "10", message], check=False, capture_output=True)
+    except OSError as exc:
+        logger.warning("cannot notify-send: %s", exc)
+
+
+def _cleanup_pidfile(pid_path: str) -> None:
+    """Remove this worker's pidfile at the end of the run (§5). Harmless if absent."""
+    _safe_remove(pid_path)
+
+
 def _run(run_paths: Paths, args: argparse.Namespace) -> int:
     """The single shared backup path (§6 + Steps 7-9).
 
@@ -461,21 +498,29 @@ def _run(run_paths: Paths, args: argparse.Namespace) -> int:
     rc = acquire_lock(run_paths, args.lock_timeout)
     if rc != 0:
         return rc  # 20: a backup is already running
-
-    # Age gate — authoritative (§4). Skip if a backup exists within max_age.
+    archive = None  # assigned by make_archive; stays None on the skip or hard-error paths
+    # Age gate — authoritative (§4). Skip (rc=10) if a backup exists within max_age.
     newest = newest_backup(run_paths.backup_dir)
     if newest is not None and now() - os.path.getmtime(newest) < args.max_age * 3600.0:
         logger.info("skip recent backup %s", newest)
-        return 10
-    # Steps 7-9: archive below, then prune (Step 8); notify + pidfile cleanup (Step 9) follow.
-    rc, archive = make_archive(run_paths, args)
-    if rc != 0:
-        return rc  # Step 7 hygiene: the .part was removed, so no stray archive (§5 exit 1)
-    logger.info("backup created: %s", newest_backup(run_paths.backup_dir))
-    # Step 8: drop older archives beyond `keep`; guard the just-created archive by name.
-    prune_dir(run_paths.backup_dir, args.keep, exclude=archive)
-    # Notify (Step 9) + pidfile cleanup are next; this step leaves the keep-newest set.
-    return 0
+        rc = 10
+    else:
+        # Steps 7-8: build the archive (rc=1 on hard error; the .part was removed on
+        # failure, so rc=1 leaves no stray archive). Prune runs only when it succeeded.
+        arc_rc, archive = make_archive(run_paths, args)
+        if arc_rc != 0:
+            rc = 1
+        else:
+            logger.info("backup created: %s", newest_backup(run_paths.backup_dir))
+            prune_dir(run_paths.backup_dir, args.keep, exclude=archive)
+            rc = 0
+
+    # Step 9 completion: gated notify-send, the structured log line, pidfile cleanup;
+    # return the §5 worker code.
+    logger.info("completed rc=%d: %s", rc, _completion_summary(rc))
+    notify_completion(rc, archive, newest)
+    _cleanup_pidfile(run_paths.pid_path)
+    return rc
 
 
 if __name__ == "__main__":
