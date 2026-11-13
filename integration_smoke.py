@@ -108,8 +108,8 @@ def run_worker(folder, keep=None):
     the read time we care about; we instead use (timestamp of 'completed rc=N') minus
     (timestamp of the worker's first log line).
     """
+    cmd = [sys.executable, SCRIPT, folder, "-t", "30"]
     bd = os.path.join(os.path.dirname(folder), "backups")
-    cmd = [sys.executable, "-B", SCRIPT, "-f", folder, "-t", "30"]
     if keep is not None:
         cmd += ["--keep", str(keep)]
     p = subprocess.run(

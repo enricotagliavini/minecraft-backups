@@ -24,10 +24,10 @@ _SPEC.loader.exec_module(mb)
 
 def _make_backup(tmp_path, mtime, monkeypatch):
     """A saves folder with one archive at `mtime`; now() is fixed to `mtime + 3600`.
-    Returns the --folder path for main()."""
+    Returns the folder path for main()."""
     saves = tmp_path / "saves"
     saves.mkdir()
-    backups = tmp_path / "backups"  # backup_dir is the parent of --folder
+    backups = tmp_path / "backups"  # backup_dir is the parent of the folder
     backups.mkdir()
     (backups / "backup.tar.zst").write_bytes(b"x")
     os.utime(str(backups / "backup.tar.zst"), (float(mtime), float(mtime)))
@@ -39,7 +39,7 @@ def _make_backup(tmp_path, mtime, monkeypatch):
 
 
 def test_parser_defaults(tmp_path):
-    args = mb.build_parser().parse_args(["-f", str(tmp_path)])
+    args = mb.build_parser().parse_args([str(tmp_path)])
     assert args.folder == str(tmp_path)
     assert args.max_age == 24.0
     assert args.keep == 5
@@ -48,52 +48,52 @@ def test_parser_defaults(tmp_path):
 
 def test_parser_requires_folder():
     with pytest.raises(SystemExit):
-        mb.build_parser().parse_args(["-f"])
+        mb.build_parser().parse_args([])
 
 
 def test_parser_rejects_unknown_flag(tmp_path):
     with pytest.raises(SystemExit):
-        mb.build_parser().parse_args(["-f", str(tmp_path), "--nope"])
+        mb.build_parser().parse_args([str(tmp_path), "--nope"])
 
 
 def test_parser_detach_dest_is_launch(tmp_path):
-    assert mb.build_parser().parse_args(["-f", str(tmp_path), "--detach-worker"]).launch is True
+    assert mb.build_parser().parse_args([str(tmp_path), "--detach-worker"]).launch is True
 
 
 # --- Value validation (plan.md §3/§5) ----------------------------------------
 
 
 def test_keep_zero_rejected(tmp_path):
-    args = mb.build_parser().parse_args(["-f", str(tmp_path), "-k", "0"])
+    args = mb.build_parser().parse_args([str(tmp_path), "-k", "0"])
     with pytest.raises(mb.SetupError):
         mb.validate_args(args)
 
 
 def test_max_age_zero_rejected(tmp_path):
-    args = mb.build_parser().parse_args(["-f", str(tmp_path), "-a", "0"])
+    args = mb.build_parser().parse_args([str(tmp_path), "-a", "0"])
     with pytest.raises(mb.SetupError):
         mb.validate_args(args)
 
 
 def test_lock_timeout_negative_rejected(tmp_path):
-    args = mb.build_parser().parse_args(["-f", str(tmp_path), "-t", "-1"])
+    args = mb.build_parser().parse_args([str(tmp_path), "-t", "-1"])
     with pytest.raises(mb.SetupError):
         mb.validate_args(args)
 
 
 def test_invalid_args_exit_2(tmp_path):
     # Bad value survives argparse (0 is a valid int) and is caught by setup -> 2.
-    assert mb.main(["-f", str(tmp_path), "-k", "0"]) == 2
+    assert mb.main([str(tmp_path), "-k", "0"]) == 2
 
 
 # --- Path resolution (plan.md §3) --------------------------------------------
 
 
 def test_default_paths(tmp_path):
-    # backup_dir is the PARENT of --folder, with a "backups" suffix (§2/§3).
+    # backup_dir is the PARENT of the folder, with a "backups" suffix (§2/§3).
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves)]))
     assert paths.folder == str(saves)
     assert paths.backup_dir == str(tmp_path / "backups")
     assert paths.log_file == str(tmp_path / "backups" / "backup.log")
@@ -104,13 +104,13 @@ def test_default_paths(tmp_path):
 def test_backup_dir_override(tmp_path):
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves), "-B", str(tmp_path / "custom")]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves), "-B", str(tmp_path / "custom")]))
     assert paths.backup_dir == str(tmp_path / "custom")
 
 
 def test_missing_folder_exit_2(tmp_path):
     missing = tmp_path / "nope" / "deep" / "saves"
-    assert mb.main(["-f", str(missing)]) == 2
+    assert mb.main([str(missing)]) == 2
 
 
 # --- newest_backup (§4) ------------------------------------------------------
@@ -134,27 +134,27 @@ def test_no_backup_proceeds(tmp_path):
     # Fresh folder, real clock, no archives -> nothing to skip.
     saves = tmp_path / "saves"
     saves.mkdir()
-    assert mb.main(["-f", str(saves), "--detach-worker", "-a", "24"]) == 0
+    assert mb.main([str(saves), "--detach-worker", "-a", "24"]) == 0
 
 
 def test_recent_backup_skips(tmp_path, monkeypatch):
     # 1h old < 24h max_age -> age gate skips.
     saves = _make_backup(tmp_path, 1_000_000.0, monkeypatch)
-    assert mb.main(["-f", saves, "--detach-worker", "-a", "24"]) == 10
+    assert mb.main([saves, "--detach-worker", "-a", "24"]) == 10
 
 
 def test_old_backup_proceeds(tmp_path, monkeypatch):
     # ~27h old > 24h -> age gate does not skip.
     saves = _make_backup(tmp_path, 1_000_000.0, monkeypatch)
     monkeypatch.setattr(mb, "now", lambda: 1_000_000.0 + 100_000.0)
-    assert mb.main(["-f", saves, "--detach-worker", "-a", "24"]) == 0
+    assert mb.main([saves, "--detach-worker", "-a", "24"]) == 0
 
 
 def test_age_exactly_max_age_proceeds(tmp_path, monkeypatch):
     # age == max_age is NOT "< max_age", so it proceeds (boundary of §4).
     saves = _make_backup(tmp_path, 500_000.0, monkeypatch)
     monkeypatch.setattr(mb, "now", lambda: 500_000.0 + 24 * 3600.0)
-    assert mb.main(["-f", saves, "--detach-worker", "-a", "24"]) == 0
+    assert mb.main([saves, "--detach-worker", "-a", "24"]) == 0
 
 
 # --- Locking / skip-if-running (plan.md §5/§8) -------------------------------
@@ -163,7 +163,7 @@ def test_age_exactly_max_age_proceeds(tmp_path, monkeypatch):
 def test_free_lock_is_released_and_writes_pidfile(tmp_path):
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves)]))
     assert mb.acquire_lock(paths, lock_timeout=1.0) == 0
     # A second acquire is also free (no leak), and a pid is recorded.
     assert mb.acquire_lock(paths, lock_timeout=1.0) == 0
@@ -174,7 +174,7 @@ def test_stale_pid_is_ignored(tmp_path):
     # flock, not the pidfile, decides; a dead pid must not block a fresh lock.
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves)]))
     Path(paths.pid_path).write_text("999999")
     assert mb.acquire_lock(paths, lock_timeout=1.0) == 0
 
@@ -183,11 +183,11 @@ def test_held_lock_exits_20(tmp_path):
     # A backup already running: the foreground pre-spawn check returns 20.
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves)]))
     lock_fd = os.open(paths.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     try:
-        assert mb.main(["-f", str(saves), "-t", "0.2"]) == 20
+        assert mb.main([str(saves), "-t", "0.2"]) == 20
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -197,7 +197,7 @@ def test_unwritable_dir_locks_path_usage_error(tmp_path):
     # dir isn't writable, the lock file can't be created -> code 2 (not 8).
     saves = tmp_path / "saves"
     saves.mkdir()
-    paths = mb.setup(mb.build_parser().parse_args(["-f", str(saves)]))
+    paths = mb.setup(mb.build_parser().parse_args([str(saves)]))
     os.chmod(paths.backup_dir, 0o555)
     try:
         assert mb.acquire_lock(paths, lock_timeout=1.0) == 2

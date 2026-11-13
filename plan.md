@@ -44,7 +44,7 @@ Target: Fedora 44, unprivileged user, GUI desktop (notify-send).
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-f, --folder` | *(required)* | Directory whose **contents** are archived |
+| folder (positional, required) | *(required)* | Directory whose **contents** are archived |
 | `-B, --backup-dir` | `<parent-of-folder>/backups` | Where archives are written |
 | `-a, --max-age` | `24` (hours) | Only create if no backup is younger than this |
 | `-k, --keep` | `5` | Number of newest backups to retain |
@@ -87,7 +87,7 @@ sequenceDiagram
     participant W as setsid worker — runs _run
     participant F as filesystem
 
-    L->>S run script --folder <dir>
+    L->>S run script <dir>
     S->>S resolve paths / args
     S->>S check lock briefly: another run in progress → return 20
     alt lock free
@@ -119,7 +119,7 @@ Create `minecraft-backups.py`, `plan.md`, `agents.md`, a `README.md`.
 - Small README with a **manual run example** for the launcher.
 
 ### Step 2 — Argument parsing (§3)
-- `argparse` in `minecraft-backups.py`; required `-f/--folder`.
+:- `argparse` in `minecraft-backups.py`; required positional `folder` (single directory).
 - Returns parsed options; unknown args fail cleanly.
 
 ### Step 3 — Path helpers + exit-code contract

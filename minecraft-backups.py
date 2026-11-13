@@ -69,16 +69,16 @@ def build_parser() -> argparse.ArgumentParser:
                "backup job is launched, so minecraft can start while it runs.",
     )
     parser.add_argument(
-        "-f", "--folder", required=True, metavar="DIR",
+        "folder", metavar="DIR",
         help="directory whose *contents* are archived (e.g. ~/.minecraft/saves)",
     )
     # --backup-dir and --log-file intentionally have no argparse default here: they are
-    # resolved from --folder / --backup-dir in Step 3 (plan §3). The help text documents
+    # resolved from the folder / --backup-dir in Step 3 (plan §3). The help text documents
     # their effective default so the parser matches plan.md and README.
     parser.add_argument(
 
         "-B", "--backup-dir", metavar="DIR",
-        help="directory that receives archives; defaults to the parent of --folder "
+        help="directory that receives archives; defaults to the parent of the folder "
              "with a 'backups' suffix",
     )
     parser.add_argument(

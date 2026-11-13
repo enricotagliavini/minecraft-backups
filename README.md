@@ -29,7 +29,7 @@ minecraft starts while the archive is written in the background.
 Run it directly once to see it work:
 
 ```
-python3 minecraft-backups.py --folder ~/.minecraft/saves
+python3 minecraft-backups.py ~/.minecraft/saves
 ```
 
 ### As a launcher pre-command
@@ -37,23 +37,23 @@ python3 minecraft-backups.py --folder ~/.minecraft/saves
 Tell your launcher to run this command *before* starting minecraft:
 
 ```
-python3 minecraft-backups.py --folder ~/.minecraft/saves
+python3 minecraft-backups.py ~/.minecraft/saves
 ```
 
 The script exits as soon as the backup is launched. Because it uses `setsid`, the
 backup keeps running even after the launcher moves on, so you can join the game while
 it finishes. It assumes the launcher lets the pre-command return (never terminates the pre-command's process group); `setsid` covers launchers that do.
 
-> Path note: `~/.minecraft/saves` is just an example — point `--folder` at your
-> actual saves directory. The backup is written to **`/backups` next to the saves
-> folder** (one level up from `--folder`), so it never lives inside the world
-> folders.
+> Path note: `~/.minecraft/saves` is just an example — the folder is given as a
+> positional argument, so point it at your actual saves directory. The backup is
+> written to **`/backups` next to the saves folder** (one level up from the folder),
+> so it never lives inside the world folders.
 
 ## Command-line options
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-f, --folder DIR` | *(required)* | Directory whose **contents** are archived |
+| DIR (positional, required) | *(required)* | Directory whose **contents** are archived |
 | `-B, --backup-dir DIR` | `<parent-of-folder>/backups` | Where archives are written |
 | `-a, --max-age HOURS` | `24` | Only create if no backup is younger than this |
 | `-k, --keep N` | `5` | Number of newest backups to retain |
@@ -86,7 +86,7 @@ gated on `XDG_SESSION_DESKTOP` and the presence of the `notify-send` binary.
 - **Pre-command seems to hang?** It doesn't. The launcher-visible script returns `0`
   as soon as the worker is spawned; minecraft starts immediately. Only the background
   worker does the archiving.
-- **Backup in the wrong place?** Archives are written one level up from `--folder`,
+- **Backup in the wrong place?** Archives are written one level up from the folder,
   inside a `backups/` folder (override with `--backup-dir`).
 - **No desktop notification?** Notifications run only on a desktop session
   (`XDG_SESSION_DESKTOP` set) and only if `notify-send` exists; on a headless host
