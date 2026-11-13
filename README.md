@@ -42,7 +42,7 @@ python3 minecraft-backups.py --folder ~/.minecraft/saves
 
 The script exits as soon as the backup is launched. Because it uses `setsid`, the
 backup keeps running even after the launcher moves on, so you can join the game while
-it finishes.
+it finishes. It assumes the launcher lets the pre-command return (never terminates the pre-command's process group); `setsid` covers launchers that do.
 
 > Path note: `~/.minecraft/saves` is just an example — point `--folder` at your
 > actual saves directory. The backup is written to **`/backups` next to the saves
@@ -77,6 +77,20 @@ gated on `XDG_SESSION_DESKTOP` and the presence of the `notify-send` binary.
 | `20` (worker) | Skipped — a backup is already running |
 | `1` (worker) | Hard error (e.g. `tar` failed); the `.part` file is removed, no partial archive left |
 | `2` (worker) | Path/usage error |
+
+## Troubleshooting
+
+- **Nothing was backed up?** The worker logs everything to `<backup-dir>/backup.log`
+  (e.g. `~/.minecraft/backups/backup.log`). Open it to see the outcome: created,
+  skipped (a backup exists within `--max-age`), or failed.
+- **Pre-command seems to hang?** It doesn't. The launcher-visible script returns `0`
+  as soon as the worker is spawned; minecraft starts immediately. Only the background
+  worker does the archiving.
+- **Backup in the wrong place?** Archives are written one level up from `--folder`,
+  inside a `backups/` folder (override with `--backup-dir`).
+- **No desktop notification?** Notifications run only on a desktop session
+  (`XDG_SESSION_DESKTOP` set) and only if `notify-send` exists; on a headless host
+  they are skipped silently.
 
 ## See also
 
