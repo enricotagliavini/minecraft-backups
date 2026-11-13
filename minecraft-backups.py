@@ -31,7 +31,7 @@ import time
 
 # --- defaults (§3 of plan.md) -------------------------------------------------
 TOOL_NAME = "minecraft-backups"
-DEFAULT_MAX_AGE_HOURS = 24.0
+DEFAULT_MAX_AGE_HOURS = 16.0
 DEFAULT_KEEP = 5
 DEFAULT_LOCK_TIMEOUT_SECONDS = 60.0
 DEFAULT_BACKUP_DIR_SUFFIX = "backups"
